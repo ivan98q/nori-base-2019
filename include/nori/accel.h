@@ -29,6 +29,20 @@ NORI_NAMESPACE_BEGIN
  * through the geometry.
  */
 class Accel {
+  struct Node {
+    virtual ~Node() = default;
+  };
+  struct GrayNode : Node {
+    Node* children[8];
+  };
+  struct BlackNode : Node {
+    std::vector<uint32_t> triangleIndices;
+  };
+
+  struct WhiteNode : Node {
+  };
+
+
 public:
     /**
      * \brief Register a triangle mesh for inclusion in the acceleration
@@ -68,6 +82,9 @@ public:
 private:
     Mesh         *m_mesh = nullptr; ///< Mesh (only a single one for now)
     BoundingBox3f m_bbox;           ///< Bounding box of the entire scene
+    Node*         m_tree;
+    Node* buildTree(BoundingBox3f boundingBox, std::vector<uint32_t> triangles,int treeDepth);
+    WhiteNode* Singleton = new WhiteNode {};
 };
 
 NORI_NAMESPACE_END
