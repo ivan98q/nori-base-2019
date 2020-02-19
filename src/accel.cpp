@@ -19,7 +19,10 @@
 #include <nori/accel.h>
 #include <Eigen/Geometry>
 #include <queue>
+#include <stack>
 #include <chrono>
+#include <numeric>
+#include <algorithm>
 
 template<typename Base, typename T>
 inline bool instanceof(const T *ptr) {
@@ -34,7 +37,6 @@ void Accel::addMesh(Mesh *mesh) {
     m_bbox = m_mesh->getBoundingBox();
 }
 
-// TODO: NEED TO TEST THIS FUNCTION
 Accel::Node* Accel::buildTree(BoundingBox3f boundingBox, std::vector<uint32_t> triangles,int treeDepth) {
   if(triangles.empty()) {
     return Singleton;
@@ -68,13 +70,7 @@ Accel::Node* Accel::buildTree(BoundingBox3f boundingBox, std::vector<uint32_t> t
   for(uint32_t idx = 0; idx < triangles.size(); idx++) { //For all triangles for this subnode
 
     uint32_t index = triangles[idx];
-    uint32_t i0 = m_F(0, index), i1 = m_F(1, index), i2 = m_F(2, index);
-    const Point3f p0 = m_V.col(i0), p1 = m_V.col(i1), p2 = m_V.col(i2);
-    BoundingBox3f triangleBox = BoundingBox3f();
-    triangleBox.expandBy(p0);
-    triangleBox.expandBy(p1);
-    triangleBox.expandBy(p2);
-
+    BoundingBox3f triangleBox = m_mesh->getBoundingBox(index);
     for(uint32_t jdx = 0; jdx < 8; jdx++) { // For all cubes
       if(triangleBox.overlaps(subBoxes[jdx])) {
         childTriangles[jdx].push_back(index);
@@ -91,11 +87,6 @@ Accel::Node* Accel::buildTree(BoundingBox3f boundingBox, std::vector<uint32_t> t
 }
 
 void Accel::build() {
-  
-  cout << std::to_string(sizeof(BlackNode)) <<"\n";
-  cout << std::to_string(sizeof(WhiteNode))<<"\n";
-  cout << std::to_string(sizeof(GrayNode))<<"\n";
-  cout << std::to_string(sizeof(Node))<<"\n";
   std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
   std::vector<uint32_t> triangleIndices = std::vector<uint32_t>();
   for (uint32_t i=0; i< m_mesh->getTriangleCount();i++) {
@@ -106,14 +97,15 @@ void Accel::build() {
   std::chrono::high_resolution_clock::time_point t2 = std::chrono::high_resolution_clock::now();
   std::chrono::duration<double, std::milli> time_span = t2 - t1;
   std::cout << "It took me " << time_span.count() << " milliseconds.\n";
-  std::queue<Node *> traversal = std::queue<Node *>();
+  std::stack<Node *> traversal = std::stack<Node *>();
   traversal.push(m_tree);
   uint32_t grayNodeCount = 0;
   uint32_t blackNodeCount = 0;
   uint32_t averageTriangles = 0;
   while(!traversal.empty()){
-    Node* currNode = traversal.front();
+    Node* currNode = traversal.top();
     traversal.pop();
+
     if(instanceof<GrayNode>(currNode)) { // GrayNode
       GrayNode* grayNode = (GrayNode *) currNode;
       grayNodeCount++;
@@ -131,6 +123,23 @@ void Accel::build() {
   cout << "The average number of triangles is  " <<  averageTriangles / blackNodeCount << "\n";
 
 }
+// I want to sort the indices since I need to sort two different arrays based on one array
+std::vector<size_t> sort_indices(const Ray3f &ray, BoundingBox3f boundingBoxes[8]) {
+  std::vector<size_t> indices(8);
+  float distances[8] = {};
+  float crap = 0;
+  for(uint32_t i = 0; i < 8; i++) {
+    if (boundingBoxes[i].rayIntersect(ray,distances[i],crap) == false) {
+      distances[i] = std::numeric_limits<float>::infinity();
+    }
+  }
+  std::iota(indices.begin(),indices.end(),0);
+  std::sort(indices.begin(),indices.end(),
+       [&distances](size_t i1, size_t i2){
+         return distances[i1] < distances[i2];
+       });
+  return indices;
+}
 
 bool Accel::rayIntersect(const Ray3f &ray_, Intersection &its, bool shadowRay) const {
     bool foundIntersection = false;  // Was an intersection found so far?
@@ -138,10 +147,10 @@ bool Accel::rayIntersect(const Ray3f &ray_, Intersection &its, bool shadowRay) c
 
     Ray3f ray(ray_); /// Make a copy of the ray (we will need to update its '.maxt' value)
 
-    std::queue<std::pair<Node *,BoundingBox3f>> traversal = std::queue<std::pair<Node *,BoundingBox3f>>();
+    std::stack<std::pair<Node *,BoundingBox3f>> traversal = std::stack<std::pair<Node *,BoundingBox3f>>();
     traversal.push(std::make_pair(m_tree,m_mesh->getBoundingBox()));
     while(!traversal.empty()){
-      std::pair<Node *,BoundingBox3f> pair = traversal.front();
+      std::pair<Node *,BoundingBox3f> pair = traversal.top();
       traversal.pop();
 
       Node* currNode = pair.first;
@@ -149,6 +158,9 @@ bool Accel::rayIntersect(const Ray3f &ray_, Intersection &its, bool shadowRay) c
 
       if(boundingBox.rayIntersect(ray_)) {
         if(instanceof<GrayNode>(currNode)) { // GrayNode
+          if(foundIntersection) {
+            break;
+          }
           GrayNode* grayNode = (GrayNode *) currNode;
           Point3f center = boundingBox.getCenter();
           Point3f max = boundingBox.max;
@@ -163,13 +175,28 @@ bool Accel::rayIntersect(const Ray3f &ray_, Intersection &its, bool shadowRay) c
            BoundingBox3f(Point3f(min(0,0),center(1,0),center(2,0)),Point3f(center(0,0),max(1,0),max(2,0))),
            BoundingBox3f(center,max)
           };
+
+          float distances[8] = {};
+          size_t indices[8] = {};
+          std::iota(indices,indices+8,0);
+          float c = 0;
           for(uint32_t i=0; i < 8; i++) {
-            if(subBoxes[i].rayIntersect(ray)) {
-              traversal.push(std::make_pair(grayNode->children[i],subBoxes[i]));
+            if(!subBoxes[i].rayIntersect(ray,distances[i],c)){
+              distances[i] = std::numeric_limits<float>::infinity();
+            }
+          }
+          std::sort(indices,indices+8,
+                    [&distances](size_t i1, size_t i2){
+                      return distances[i1] > distances[i2];
+                    });
+          for(uint32_t i = 0; i < 8;i++){
+            uint32_t idx = indices[i];
+            if(!(distances[idx] == std::numeric_limits<float>::infinity())) {
+              traversal.push(std::make_pair(grayNode->children[idx],subBoxes[idx]));
             }
           }
 
-        }else if(instanceof<BlackNode>(currNode)) {
+        } else if(instanceof<BlackNode>(currNode)) {
           BlackNode* blackNode = (BlackNode *) currNode;
           for (uint32_t idx = 0; idx < blackNode->triangleIndices.size(); ++idx) {
             uint32_t index = blackNode->triangleIndices[idx];
@@ -183,29 +210,10 @@ bool Accel::rayIntersect(const Ray3f &ray_, Intersection &its, bool shadowRay) c
               f = index;
               foundIntersection = true;
             }
-    }
-        }else if(instanceof<WhiteNode>(currNode)){
-        }else{
+          }
         }
       }
    }
-
-    /* Brute force search through all triangles
-    for (uint32_t idx = 0; idx < m_mesh->getTriangleCount(); ++idx) {
-        float u, v, t;
-        if (m_mesh->rayIntersect(idx, ray, u, v, t)) {
-            An intersection was found! Can terminate
-               immediately if this is a shadow ray query
-            if (shadowRay)
-                return true;
-            ray.maxt = its.t = t;
-            its.uv = Point2f(u, v);
-            its.mesh = m_mesh;
-            f = idx;
-            foundIntersection = true;
-        }
-    }
-    */
 
     if (foundIntersection) {
         /* At this point, we now know that there is an intersection,
